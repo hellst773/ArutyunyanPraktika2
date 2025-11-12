@@ -7,4 +7,4 @@
 Чтобы запустить приложение, используйте следующую команду:
 
 ```bash
-py script.py --package_name "mypackage" --repo_url "C:/path/to/repo" --repo_mode "R" --output_file "graph_output.png"
+py script.py --package_name "mypackage" --repo_url "C:\Users\rolan\PyCharmMiscProject/requirements.txt" --repo_mode "R" --output_file "graph_output.png"
