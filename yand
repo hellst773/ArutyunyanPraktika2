@@ -1,4 +1,4 @@
-Я создам систему с авторизацией по почте и универсальными кодами доступа. Вот обновленный код:
+Вот обновленный код с кнопками, проверкой данных и возможностью работы без регистрации:
 
 ```python
 import asyncio
@@ -18,7 +18,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 # ================== НАСТРОЙКИ ==================
 CONFIG = {
@@ -29,7 +29,6 @@ CONFIG = {
     "ACCESS_CODES_FILE": "access_codes.json"
 }
 
-# ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -42,25 +41,10 @@ class RegistrationStates(StatesGroup):
 class AccessCodeStates(StatesGroup):
     waiting_for_code = State()
 
-# ================== ИНИЦИАЛИЗАЦИЯ БОТА ==================
+# ================== ИНИЦИАЛИЗАЦИЯ ==================
 storage = MemoryStorage()
 bot = Bot(token=CONFIG["TG_BOT_TOKEN"])
 dp = Dispatcher(storage=storage)
-
-# ================== СТРУКТУРА ДАННЫХ ==================
-# users.json: {
-#   "telegram_id": {
-#     "email": "email@example.com",
-#     "password": "encrypted_password",
-#     "imap_server": "imap.yandex.ru",
-#     "universal_code": "ABC123XYZ",
-#     "granted_users": [telegram_id1, telegram_id2, ...]
-#   }
-# }
-#
-# access_codes.json: {
-#   "ABC123XYZ": telegram_id_owner
-# }
 
 def load_users() -> Dict:
     if not os.path.exists(CONFIG["USERS_FILE"]):
@@ -83,13 +67,41 @@ def save_access_codes(codes: Dict):
         json.dump(codes, f, ensure_ascii=False, indent=2)
 
 def generate_universal_code() -> str:
-    """Генерирует уникальный 9-символьный код"""
     return secrets.token_urlsafe(6).upper()[:9]
 
 users = load_users()
 access_codes = load_access_codes()
 
-# ================== ДЕКОДИРОВАНИЕ ТЕКСТА ==================
+# ================== КЛАВИАТУРЫ ==================
+def get_cancel_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel")]
+    ])
+
+def get_main_menu_keyboard(is_registered: bool):
+    if is_registered:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📬 Проверить почту", callback_data="check_mail")],
+            [InlineKeyboardButton(text="🔑 Мой код", callback_data="my_code")],
+            [InlineKeyboardButton(text="🔐 Ввести код доступа", callback_data="enter_code")],
+            [InlineKeyboardButton(text="📋 Список почт", callback_data="list_emails")],
+            [InlineKeyboardButton(text="🚪 Выйти", callback_data="logout")]
+        ])
+    else:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Зарегистрироваться", callback_data="register")],
+            [InlineKeyboardButton(text="🔐 Ввести код доступа", callback_data="enter_code")]
+        ])
+
+def get_imap_help_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📧 Яндекс", callback_data="imap_yandex")],
+        [InlineKeyboardButton(text="📧 Gmail", callback_data="imap_gmail")],
+        [InlineKeyboardButton(text="📧 Mail.ru", callback_data="imap_mailru")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel")]
+    ])
+
+# ================== ДЕКОДИРОВАНИЕ ==================
 def decode_mime_string(encoded: str) -> str:
     decoded_parts = decode_header(encoded)
     result = ""
@@ -133,8 +145,7 @@ def get_email_body(msg) -> str:
             if content_type == "text/plain":
                 payload = part.get_payload(decode=True)
                 charset = part.get_content_charset()
-                return _decode_payload(payload, charset)
-            elif content_type == "text/html":
+                return _decode_payload(payload, charset)elif content_type == "text/html":
                 payload = part.get_payload(decode=True)
                 charset = part.get_content_charset()
                 text = _decode_payload(payload, charset)
@@ -146,9 +157,8 @@ def get_email_body(msg) -> str:
         return _decode_payload(payload, charset)
     return "[Не удалось извлечь текст письма]"
 
-# ================== ФУНКЦИЯ ПРОВЕРКИ ПОЧТЫ ==================
+# ================== ПРОВЕРКА ПОЧТЫ ==================
 def check_email(email_account: str, email_password: str, imap_server: str) -> List[Dict]:
-    """Проверяет почту и возвращает список непрочитанных писем"""
     try:
         mail = imaplib.IMAP4_SSL(imap_server, CONFIG["IMAP_PORT"])
         mail.login(email_account, email_password)
@@ -189,76 +199,147 @@ def check_email(email_account: str, email_password: str, imap_server: str) -> Li
                 "date": date.strftime('%Y-%m-%d %H:%M:%S'),
                 "body": body,
                 "uid": uid
-            })
-
-            mail.uid("store", str(uid), "+FLAGS", "\\Seen")
+            })mail.uid("store", str(uid), "+FLAGS", "\\Seen")
 
         mail.logout()
         return emails_data
 
     except Exception as e:
         logger.error(f"Ошибка при проверке почты: {e}")
-        return []
+        raise
 
 # ================== КОМАНДА /start ==================
 @dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
+async def cmd_start(message: Message):
     chat_id = str(message.chat.id)
+    is_registered = chat_id in users
     
-    if chat_id in users:
+    if is_registered:
         code = users[chat_id]["universal_code"]
         await message.answer(
-            f"✅ Вы уже зарегистрированы!\n\n"
-            f"🔑 Ваш универсальный код: `{code}`\n\n"
-            f"Команды:\n"
-            f"/cod - Проверить почту\n"
-            f"/mycode - Показать мой код\n"
-            f"/access - Ввести чужой код\n"
-            f"/list - Список доступных почт\n"
-            f"/logout - Выйти из аккаунта",
+            f"👋 С возвращением!\n\n"
+            f"🔑 Ваш код: `{code}`\n\n"
+            f"Выберите действие:",
+            reply_markup=get_main_menu_keyboard(True),
             parse_mode="Markdown"
         )
     else:
         await message.answer(
             "👋 Добро пожаловать!\n\n"
-            "Для начала работы введите ваш email:"
+            "Вы можете:\n"
+            "• Зарегистрироваться и получить свой код\n"
+            "• Ввести чужой код для доступа к почте\n\n"
+            "Выберите действие:",
+            reply_markup=get_main_menu_keyboard(False)
         )
-        await state.set_state(RegistrationStates.waiting_for_email)
 
-# ================== РЕГИСТРАЦИЯ ==================
+# ================== CALLBACK: ОТМЕНА ==================
+@dp.callback_query(F.data == "cancel")
+async def callback_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    chat_id = str(callback.from_user.id)
+    is_registered = chat_id in users
+    
+    await callback.message.edit_text(
+        "❌ Действие отменено.\n\nВыберите действие:",
+        reply_markup=get_main_menu_keyboard(is_registered)
+    )
+    await callback.answer()
+
+# ================== CALLBACK: РЕГИСТРАЦИЯ ==================
+@dp.callback_query(F.data == "register")
+async def callback_register(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📧 Введите ваш email адрес:\n\n"
+        "💡 Примеры:\n"
+        "• example@yandex.ru\n"
+        "• example@gmail.com\n"
+        "• example@mail.ru",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(RegistrationStates.waiting_for_email)
+    await callback.answer()
+
+# ================== РЕГИСТРАЦИЯ: EMAIL ==================
 @dp.message(StateFilter(RegistrationStates.waiting_for_email))
 async def process_email(message: Message, state: FSMContext):
     email_address = message.text.strip()
     
-    if "@" not in email_address:
-        await message.answer("❌ Некорректный email. Попробуйте снова:")
+    if "@" not in email_address or "." not in email_address:
+        await message.answer(
+            "❌ Некорректный email!\n\n"
+            "Email должен содержать @ и домен (например: user@yandex.ru)\n\n"
+            "Попробуйте снова:",
+            reply_markup=get_cancel_keyboard()
+        )
         return
     
     await state.update_data(email=email_address)
-    await message.answer("📧 Email сохранен!\n\nТеперь введите пароль от почты (пароль приложения):")
+    await message.answer(
+        f"✅ Email сохранен: {email_address}\n\n"
+        "🔒 Теперь введите пароль от почты:\n\n"
+        "⚠️ Важно:\n"
+        "• Для Яндекс/Gmail нужен пароль приложения, а не основной пароль\n"
+        "• Пароль будет проверен при подключении\n"
+        "• Сообщение с паролем будет удалено автоматически",
+        reply_markup=get_cancel_keyboard()
+    )
     await state.set_state(RegistrationStates.waiting_for_password)
 
+# ================== РЕГИСТРАЦИЯ: ПАРОЛЬ ==================
 @dp.message(StateFilter(RegistrationStates.waiting_for_password))
 async def process_password(message: Message, state: FSMContext):
     password = message.text.strip()
-    await state.update_data(password=password)
     
-    # Удаляем сообщение с паролем для безопасности
+    if len(password) < 4:
+        await message.answer(
+            "❌ Пароль слишком короткий!\n\n"
+            "Попробуйте снова:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    await state.update_data(password=password)
     try:
         await message.delete()
     except:
         pass
     
     await message.answer(
-        "🔒 Пароль сохранен!\n\n"
-        "Теперь введите IMAP сервер вашей почты:\n"
-        "Примеры:\n"
-        "• imap.yandex.ru (для Яндекс)\n"
-        "• imap.gmail.com (для Gmail)\n"
-        "• imap.mail.ru (для Mail.ru)"
+        "✅ Пароль сохранен!\n\n"
+        "🌐 Теперь выберите ваш почтовый сервис или введите IMAP сервер вручную:",
+        reply_markup=get_imap_help_keyboard()
     )
     await state.set_state(RegistrationStates.waiting_for_imap_server)
 
+# ================== CALLBACK: IMAP СЕРВЕРЫ ==================
+@dp.callback_query(F.data.startswith("imap_"))
+async def callback_imap_select(callback: CallbackQuery, state: FSMContext):
+    imap_servers = {
+        "imap_yandex": "imap.yandex.ru",
+        "imap_gmail": "imap.gmail.com",
+        "imap_mailru": "imap.mail.ru"
+    }
+    
+    imap_server = imap_servers.get(callback.data)
+    if imap_server:
+        await callback.message.edit_text(f"⏳ Выбран сервер: {imap_server}\n\nПроверяю подключение...")
+        await callback.answer()
+        
+        # Имитируем ввод сервера
+        fake_message = types.Message(
+            message_id=callback.message.message_id,
+            date=callback.message.date,
+            chat=callback.message.chat,
+            from_user=callback.from_user,
+            text=imap_server
+        )
+        fake_message.answer = callback.message.answer
+        fake_message.delete = callback.message.delete
+        
+        await process_imap_server(fake_message, state)
+
+# ================== РЕГИСТРАЦИЯ: IMAP СЕРВЕР ==================
 @dp.message(StateFilter(RegistrationStates.waiting_for_imap_server))
 async def process_imap_server(message: Message, state: FSMContext):
     imap_server = message.text.strip()
@@ -267,28 +348,42 @@ async def process_imap_server(message: Message, state: FSMContext):
     email_account = data["email"]
     password = data["password"]
     
-    await message.answer("⏳ Проверяю подключение к почте...")
+    status_msg = await message.answer("⏳ Проверяю подключение к почте...")
     
-    # Проверяем подключение
     try:
         mail = imaplib.IMAP4_SSL(imap_server, CONFIG["IMAP_PORT"])
         mail.login(email_account, password)
         mail.logout()
+    except imaplib.IMAP4.error as e:
+        await status_msg.edit_text(
+            f"❌ Ошибка авторизации!\n\n"
+            f"Возможные причины:\n"
+            f"• Неверный логин или пароль\n"
+            f"• Нужен пароль приложения (не основной пароль)\n"
+            f"• Не включен доступ по IMAP в настройках почты\n\n"
+            f"Детали: {str(e)}\n\n"
+            f"Попробуйте снова или выберите другой сервер:",
+            reply_markup=get_imap_help_keyboard()
+        )
+        return
     except Exception as e:
-        await message.answer(
-            f"❌ Ошибка подключения: {str(e)}\n\n"
-            f"Проверьте данные и попробуйте снова. Введите IMAP сервер:"
+        await status_msg.edit_text(
+            f"❌ Ошибка подключения!\n\n"
+            f"Проверьте:\n"
+            f"• IMAP сервер введен правильно\n"
+            f"• Есть интернет соединение\n\n"
+            f"Детали: {str(e)}\n\n"
+            f"Попробуйте снова:",
+            reply_markup=get_cancel_keyboard()
         )
         return
     
-    # Генерируем универсальный код
     universal_code = generate_universal_code()
     while universal_code in access_codes:
         universal_code = generate_universal_code()
     
     chat_id = str(message.chat.id)
     
-    # Сохраняем пользователя
     users[chat_id] = {
         "email": email_account,
         "password": password,
@@ -302,95 +397,118 @@ async def process_imap_server(message: Message, state: FSMContext):
     save_users(users)
     save_access_codes(access_codes)
     
-    await message.answer(
+    await status_msg.edit_text(
         f"✅ Регистрация успешна!\n\n"
-        f"🔑 Ваш универсальный код: `{universal_code}`\n\n"
-        f"Этот код можно передать другим пользователям, чтобы они получили доступ к вашей почте.\n\n"
-        f"Используйте /cod для проверки почты.",
-        parse_mode="Markdown"
+        f"🔑 Ваш универсальный код:\n`{universal_code}`\n\n"
+        f"📧 Почта: {email_account}\n"
+        f"🌐 Сервер: {imap_server}\n\n"
+        f"💡 Передайте этот код другим пользователям для доступа к вашей почте.",
+        parse_mode="Markdown",
+        reply_markup=get_main_menu_keyboard(True)
     )
     await state.clear()
 
-# ================== КОМАНДА /mycode ==================
-@dp.message(Command("mycode"))
-async def cmd_mycode(message: Message):
-    chat_id = str(message.chat.id)
+# ================== CALLBACK: МОЙ КОД ==================
+@dp.callback_query(F.data == "my_code")
+async def callback_my_code(callback: CallbackQuery):
+    chat_id = str(callback.from_user.id)
     
     if chat_id not in users:
-        await message.answer("❌ Вы не зарегистрированы. Используйте /start")
+        await callback.answer("❌ Вы не зарегистрированы!", show_alert=True)
         return
     
     code = users[chat_id]["universal_code"]
     granted_count = len(users[chat_id]["granted_users"])
     
-    await message.answer(
-        f"🔑 Ваш универсальный код: `{code}`\n\n"
-        f"👥 Доступ предоставлен: {granted_count} пользователям",
-        parse_mode="Markdown"
+    await callback.message.edit_text(
+        f"🔑 Ваш универсальный код:\n`{code}`\n\n"
+        f"📧 Почта: {users[chat_id]['email']}\n"
+        f"👥 Доступ предоставлен: {granted_count} пользователям\n\n"
+        f"💡 Передайте этот код другим для доступа к вашей почте.",
+        parse_mode="Markdown",
+        reply_markup=get_main_menu_keyboard(True)
     )
+    await callback.answer()
 
-# ================== КОМАНДА /access ==================
-@dp.message(Command("access"))
-async def cmd_access(message: Message, state: FSMContext):
-    await message.answer("🔐 Введите универсальный код доступа:")
+# ================== CALLBACK: ВВЕСТИ КОД ==================
+@dp.callback_query(F.data == "enter_code")
+async def callback_enter_code(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "🔐 Введите универсальный код доступа:\n\n"
+        "💡 Код состоит из 9 символов (например: ABC123XYZ)\n"
+        "Получите его у владельца почты.",
+        reply_markup=get_cancel_keyboard()
+    )
     await state.set_state(AccessCodeStates.waiting_for_code)
+    await callback.answer()
 
+# ================== ВВОД КОДА ДОСТУПА ==================
 @dp.message(StateFilter(AccessCodeStates.waiting_for_code))
 async def process_access_code(message: Message, state: FSMContext):
     code = message.text.strip().upper()
     chat_id = str(message.chat.id)
     
     if code not in access_codes:
-        await message.answer("❌ Неверный код. Попробуйте снова или /cancel")
+        await message.answer(
+            "❌ Неверный код!\n\n"
+            "Проверьте правильность ввода и попробуйте снова:",
+            reply_markup=get_cancel_keyboard()
+        )
         return
     
     owner_id = access_codes[code]
     
     if owner_id == chat_id:
-        await message.answer("❌ Это ваш собственный код!")
+        await message.answer(
+            "❌ Это ваш собственный код!\n\n"
+            "Выберите действие:",
+            reply_markup=get_main_menu_keyboard(True)
+        )
         await state.clear()
         return
     
-    # Добавляем пользователя в список granted_users владельца
     if chat_id not in users[owner_id]["granted_users"]:
         users[owner_id]["granted_users"].append(chat_id)
         save_users(users)
+    owner_email = users[owner_id]["email"]
     
     await message.answer(
         f"✅ Доступ получен!\n\n"
-        f"Теперь вы можете проверять почту владельца этого кода.\n"
-        f"Используйте /list для просмотра доступных почт."
+        f"📧 Почта: {owner_email}\n\n"
+        f"Теперь вы можете проверять письма с этой почты.",
+        reply_markup=get_main_menu_keyboard(chat_id in users)
     )
     await state.clear()
 
-# ================== КОМАНДА /list ==================
-@dp.message(Command("list"))
-async def cmd_list(message: Message):
-    chat_id = str(message.chat.id)
+# ================== CALLBACK: СПИСОК ПОЧТ ==================
+@dp.callback_query(F.data == "list_emails")
+async def callback_list_emails(callback: CallbackQuery):
+    chat_id = str(callback.from_user.id)
     
     available_emails = []
     
-    # Своя почта
     if chat_id in users:
-        available_emails.append(f"📧 Ваша почта: {users[chat_id]['email']}")
+        available_emails.append(f"📧 Ваша почта:\n{users[chat_id]['email']}")
     
-    # Почты с доступом
     for owner_id, user_data in users.items():
         if chat_id in user_data["granted_users"]:
-            available_emails.append(f"📧 Доступ к: {user_data['email']}")
+            available_emails.append(f"📧 Доступ к:\n{user_data['email']}")
     
     if not available_emails:
-        await message.answer("❌ У вас нет доступных почт. Используйте /start или /access")
+        await callback.answer("❌ У вас нет доступных почт!", show_alert=True)
         return
     
-    await message.answer("\n".join(available_emails))
+    await callback.message.edit_text(
+        "📋 Доступные почты:\n\n" + "\n\n".join(available_emails),
+        reply_markup=get_main_menu_keyboard(chat_id in users)
+    )
+    await callback.answer()
 
-# ================== КОМАНДА /cod ==================
-@dp.message(Command("cod"))
-async def cmd_cod(message: Message):
-    chat_id = str(message.chat.id)
+# ================== CALLBACK: ПРОВЕРИТЬ ПОЧТУ ==================
+@dp.callback_query(F.data == "check_mail")
+async def callback_check_mail(callback: CallbackQuery):
+    chat_id = str(callback.from_user.id)
     
-    # Собираем все почты, к которым есть доступ
     emails_to_check = []
     
     if chat_id in users:
@@ -409,109 +527,121 @@ async def cmd_cod(message: Message):
             })
     
     if not emails_to_check:
-        await message.answer("❌ У вас нет доступных почт. Используйте /start или /access")
+        await callback.answer("❌ У вас нет доступных почт!", show_alert=True)
         return
     
-    await message.answer("🔍 Проверяю письма...")
+    await callback.message.edit_text("🔍 Проверяю письма...")
+    await callback.answer()
     
     total_found = 0
     for email_config in emails_to_check:
-        emails_data = check_email(
-            email_config["email"],
-            email_config["password"],
-            email_config["imap_server"]
-        )
-        
-        if emails_data:
-            await message.answer(f"📬 Найдено {len(emails_data)} новых писем из {email_config['email']}:")
+        try:
+            emails_data = check_email(
+                email_config["email"],
+                email_config["password"],
+                email_config["imap_server"]
+            )
             
-            for email_data in emails_data:
-                full_message = (
-                    f"📧 *Новое письмо от {email_data['from']}*\n"
-                    f"📅 {email_data['date']}\n"
-                    f"📌 Тема: {email_data['subject']}\n\n"
-                    f"{email_data['body']}"
-                )
+            if emails_data:
+                await callback.message.answer(f"📬 Найдено {len(emails_data)} новых писем из {email_config['email']}:")
                 
-                try:
-                    await message.answer(full_message, parse_mode="Markdown")
-                except:
-                    await message.answer(full_message)
-                
-                total_found += 1
+                for email_data in emails_data:
+                    full_message = (
+                        f"📧 *Новое письмо от {email_data['from']}*\n"
+                        f"📅 {email_data['date']}\n"
+                        f"📌 Тема: {email_data['subject']}\n\n"
+                        f"{email_data['body']}"
+                    )
+                    
+                    try:
+                        await callback.message.answer(full_message, parse_mode="Markdown")except:
+                        await callback.message.answer(full_message)
+                    total_found += 1
+        except Exception as e:
+            await callback.message.answer(f"❌ Ошибка при проверке {email_config['email']}: {str(e)}")
     
     if total_found == 0:
-        await message.answer("📭 Нет новых писем от sso@mirea.ru")
+        await callback.message.answer(
+            "📭 Нет новых писем от sso@mirea.ru",
+            reply_markup=get_main_menu_keyboard(True)
+        )
     else:
-        await message.answer(f"✅ Всего найдено и отправлено: {total_found} писем")
+        await callback.message.answer(
+            f"✅ Всего найдено: {total_found} писем",
+            reply_markup=get_main_menu_keyboard(True)
+        )
 
-# ================== КОМАНДА /logout ==================
-@dp.message(Command("logout"))
-async def cmd_logout(message: Message):
-    chat_id = str(message.chat.id)
+# ================== CALLBACK: ВЫХОД ==================
+@dp.callback_query(F.data == "logout")
+async def callback_logout(callback: CallbackQuery):
+    chat_id = str(callback.from_user.id)
     
     if chat_id not in users:
-        await message.answer("❌ Вы не зарегистрированы.")
+        await callback.answer("❌ Вы не зарегистрированы!", show_alert=True)
         return
     
-    # Удаляем код доступа
     code = users[chat_id]["universal_code"]
     if code in access_codes:
         del access_codes[code]
-    
-    # Удаляем пользователя
     del users[chat_id]
     
     save_users(users)
     save_access_codes(access_codes)
     
-    await message.answer("👋 Вы вышли из аккаунта. Используйте /start для новой регистрации.")
+    await callback.message.edit_text(
+        "👋 Вы вышли из аккаунта.\n\n"
+        "Ваши данные удалены.",
+        reply_markup=get_main_menu_keyboard(False)
+    )
+    await callback.answer()
 
-# ================== КОМАНДА /cancel ==================
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Действие отменено.")
+# ================== КОМАНДА /cod ==================
+@dp.message(Command("cod"))
+async def cmd_cod(message: Message):
+    await message.answer(
+        "💡 Используйте кнопку 'Проверить почту' в меню /start",
+        reply_markup=get_main_menu_keyboard(str(message.chat.id) in users)
+    )
 
 # ================== ЗАПУСК ==================
 async def main():
-    logger.info("Бот запущен. Ожидание команд...")
+    logger.info("Бот запущен с кнопками!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main)
 ```
 
-## 🎯 Основные изменения:
+## 🎯 Что добавлено:
 
-### 1. **Система регистрации**
-- При первом `/start` запрашивается email, пароль и IMAP-сервер
-- Данные сохраняются в `users.json`
-- Генерируется уникальный 9-символьный код
+### 1. **Inline кнопки везде**
+- Главное меню с кнопками действий
+- Кнопка "Отменить" на каждом шаге
+- Быстрый выбор IMAP сервера (Яндекс/Gmail/Mail.ru)
 
-### 2. **Универсальный код доступа**
-- Каждый пользователь получает свой код (например: `ABC123XYZ`)
-- Код можно передать другому человеку
-- Второй человек вводит код через `/access` и получает доступ к почте первого
+### 2. **Работа без регистрации**
+- Можно сразу ввести чужой код через кнопку "Ввести код доступа"
+- Не нужно регистрироваться, чтобы получить доступ к чужой почте
 
-### 3. **Команды**:
-- `/start` - Регистрация/приветствие
-- `/cod` - Проверить ВСЕ доступные почты
-- `/mycode` - Показать свой код
-- `/access` - Ввести чужой код
-- `/list` - Список доступных почт
-- `/logout` - Выход из аккаунта
-- `/cancel` - Отмена текущего действия
+### 3. **Проверка данных**
+- Проверка формата email (наличие @ и домена)
+- Проверка длины пароля
+- **Реальная проверка подключения** к почте перед сохранением
+- Детальные сообщения об ошибках с подсказками
 
-### 4. **Безопасность**:
-- Пароли хранятся локально (можно добавить шифрование)
-- Сообщения с паролями удаляются
+### 4. **Больше подсказок**
+- Примеры email при вводе
+- Объяснение про пароль приложения
+- Подсказки при ошибках авторизации
+- Инструкции на каждом шаге
 
-### 5. **Файлы данных**:
-- `users.json` - данные пользователей
-- `access_codes.json` - привязка кодов к владельцам
+### 5. **Улучшенный UX**
+- Все действия через кнопки
+- Автоудаление сообщений с паролем
+- Понятные статусы операций
+- Возврат в главное меню после действий
 
-Установите зависимость:
+Установите обновленную версию aiogram:
 ```bash
 pip install aiogram==3.4.1
 ```
